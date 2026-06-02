@@ -1,4 +1,6 @@
+################################################################################
 # Libraries
+################################################################################
 library(DatabaseConnector)
 library(CirceR)
 library(readr)
@@ -7,6 +9,7 @@ library(PatientLevelPrediction)
 library(FeatureExtraction)
 library(dplyr)
 library(tidyr)
+
 ################################################################################
 # Connect to database
 ################################################################################
@@ -78,31 +81,16 @@ measurementConceptIds <- c(
   3009966  # LDL cholesterol
 )
 
-baseCovariateSettings <- FeatureExtraction::createCovariateSettings(
+bpConceptId <- 3004249
+ageCovariateId <- 1002
+
+covariateSettings <- FeatureExtraction::createCovariateSettings(
   useDemographicsGender = TRUE,
   useDemographicsAge = TRUE,
   useDemographicsAgeGroup = TRUE,
-  useDemographicsEthnicity = TRUE,
-  useDemographicsRace = TRUE,
-  useConditionOccurrenceAnyTimePrior = TRUE,
-  useDrugExposureAnyTimePrior = TRUE,
-  useDeviceExposureAnyTimePrior = TRUE,
-  useProcedureOccurrenceAnyTimePrior = TRUE,
-  useMeasurementAnyTimePrior = FALSE,
-  useMeasurementValueAnyTimePrior = FALSE,
-  useObservationAnyTimePrior = TRUE
-)
-
-measurementValueSettings <- FeatureExtraction::createCovariateSettings(
-  useMeasurementValueAnyTimePrior = TRUE,
-  includedCovariateConceptIds = measurementConceptIds,
-  addDescendantsToInclude = FALSE
-)
-
-
-covariateSettings <- list(
-  baseCovariateSettings,
-  measurementValueSettings
+  useMeasurementValueLongTerm = TRUE,
+  longTermStartDays = -365,
+  endDays = 0
 )
 
 databaseDetails <- PatientLevelPrediction::createDatabaseDetails(
@@ -118,7 +106,6 @@ databaseDetails <- PatientLevelPrediction::createDatabaseDetails(
   cdmVersion = 5
 )
 
-# Can use this to restrict the sample size
 restrictPlpDataSettings <- PatientLevelPrediction::createRestrictPlpDataSettings()
 
 plpData <- PatientLevelPrediction::getPlpData(
@@ -152,25 +139,110 @@ population <- PatientLevelPrediction::createStudyPopulation(
 )
 
 populationRowIds <- population$rowId
+
 covariateAnalysis <- plpData$covariateData$analysisRef %>% collect()
 covariateRef <- plpData$covariateData$covariateRef %>% collect()
 
 covariatePopulation <- plpData$covariateData$covariates %>%
-  filter(.data$rowId %in% !!populationRowIds) %>%
+  filter(.data$rowId %in% populationRowIds) %>%
   collect()
 
-# PLP demographic covariates
+################################################################################
+# Keep only the covariates needed for simulation/imputation
+################################################################################
 demographicCovariateIds <- c(
   8003, 9003, 10003, 11003, 12003, 13003, 14003, 15003, # Age group
   1002, # Age
-  8507001, 8532001, # Gender
-  38003564005, 38003563005, # Ethnicity
-  8516004, 8515004, 8527004 # Race
+  8507001, 8532001 # Gender
 )
 
-# Helper functions for PLP long-format data
+demographicsRef <- covariateRef %>%
+  filter(.data$covariateId %in% demographicCovariateIds)
+
+demographicsAnalysis <- covariateAnalysis %>%
+  semi_join(demographicsRef, by = "analysisId")
+
+demographicsCovariateValues <- covariatePopulation %>%
+  filter(.data$covariateId %in% demographicCovariateIds) %>%
+  select(rowId, covariateId, covariateValue)
+
+measurementRef <- covariateRef %>%
+  filter(
+    !is.na(.data$conceptId),
+    .data$conceptId %in% measurementConceptIds
+  ) %>%
+  distinct(covariateId, .keep_all = TRUE)
+
+measurementAnalysis <- covariateAnalysis %>%
+  semi_join(measurementRef, by = "analysisId")
+
+measurementCovariateValues <- covariatePopulation %>%
+  filter(.data$covariateId %in% measurementRef$covariateId) %>%
+  select(rowId, covariateId, covariateValue)
+
+missingMeasurementConceptIds <- setdiff(
+  measurementConceptIds,
+  unique(measurementRef$conceptId)
+)
+
+if (length(missingMeasurementConceptIds) > 0) {
+  warning(
+    paste(
+      "No PLP measurement covariate found for conceptId(s):",
+      paste(missingMeasurementConceptIds, collapse = ", ")
+    )
+  )
+}
+
+bpCovariateIds <- measurementRef %>%
+  filter(.data$conceptId == bpConceptId) %>%
+  pull(.data$covariateId) %>%
+  unique()
+
+if (length(bpCovariateIds) != 1) {
+  stop("Expected exactly one systolic blood pressure covariate.")
+}
+
+bpCovariateId <- bpCovariateIds[[1]]
+
+analysisCovariateRef <- bind_rows(demographicsRef, measurementRef)
+analysisCovariateAnalysis <- bind_rows(demographicsAnalysis, measurementAnalysis)
+
+################################################################################
+# Helper functions to rebuild minimal PLP data
+################################################################################
+# plpDataHelper <- function(labels,
+#                           folds = NULL,
+#                           covariates,
+#                           covariateRef,
+#                           analysisRef,
+#                           templatePLPData = plpData) {
+#   covariateData <- Andromeda::andromeda(
+#     covariates = covariates,
+#     covariateRef = covariateRef,
+#     analysisRef = analysisRef
+#   )
+#   
+#   class(covariateData) <- "CovariateData"
+#   attr(covariateData, "metaData") <- attr(templatePLPData$covariateData, "metaData")
+#   
+#   plpDataOut <- list(
+#     labels = labels,
+#     covariateData = covariateData
+#   )
+#   
+#   if (!is.null(folds)) {
+#     plpDataOut$folds <- folds
+#   }
+#   
+#   class(plpDataOut) <- "plpData"
+#   attr(plpDataOut, "metaData") <- attr(templatePLPData, "metaData")
+#   
+#   plpDataOut
+# }
+
 plpDataHelper <- function(labels,
-                          folds,
+                          folds = NULL,
                           covariates,
                           covariateRef,
                           analysisRef,
@@ -182,137 +254,77 @@ plpDataHelper <- function(labels,
   )
   
   class(covariateData) <- "CovariateData"
+  attr(class(covariateData), "package") <- "FeatureExtraction"
   attr(covariateData, "metaData") <- attr(templatePLPData$covariateData, "metaData")
   
-  plpData <- list(
+  plpDataOut <- list(
     labels = labels,
-    folds = folds,
-    covariateData = covariateData
+    covariateData = covariateData,
+    metaData = templatePLPData$metaData
   )
   
-  class(plpData) <- "plpData"
-  attr(plpData, "metaData") <- attr(templatePLPData, "metaData")
+  if (!is.null(folds)) {
+    plpDataOut$folds <- folds
+  }
   
-  plpData
+  class(plpDataOut) <- "plpData"
+  plpDataOut
 }
 
-# To get population subset from PLPData 
 populationSubset <- function(population, selectedRowIds) {
   filteredPopulation <- population %>%
-    filter(.data$rowId %in% selectedRowIds)
+    dplyr::filter(.data$rowId %in% selectedRowIds)
   
   attr(filteredPopulation, "metaData") <- attr(population, "metaData")
   filteredPopulation
 }
 
-# Extract values of one covariate from population 
-extractCovariateValues <- function(plpData,
-                                   covariateId,
-                                   missingMeansZero = FALSE) {
-  values <- plpData$labels %>%
-    select("rowId") %>%
-    left_join(
-      plpData$covariateData$covariates %>%
-        filter(.data$covariateId == covariateId) %>% # get selected covariate
-        collect() %>%
-        select("rowId", "covariateValue"), # keep only the necessary columns
-      by = "rowId"
-    )
-  
-  # If missing means zero, replace NA by 0
-  if (isTRUE(missingMeansZero)) {
-    values <- values %>%
-      mutate(covariateValue = tidyr::replace_na(.data$covariateValue, 0))
-  }
-  
-  values
-}
-
-################################################################################
-# Build clean analysis PLP data
-################################################################################
-demographicsCovariateValues <- covariatePopulation %>%
-  filter(.data$covariateId %in% demographicCovariateIds) %>%
-  select("rowId", "covariateId", "covariateValue")
-
-demographicsRef <- covariateRef %>%
-  filter(.data$covariateId %in% demographicCovariateIds)
-
-demographicsAnalysis <- covariateAnalysis %>%
-  semi_join(demographicsRef, by = "analysisId")
-
-measurementRef <- covariateRef %>%
-  filter(
-    .data$analysisId == 705,
-    .data$conceptId %in% measurementConceptIds
-  )
-
-measurementAnalysis <- covariateAnalysis %>%
-  semi_join(measurementRef, by = "analysisId")
-
-measurementCovariateValues <- covariatePopulation %>%
-  filter(.data$covariateId %in% measurementRef$covariateId) %>%
-  select("rowId", "covariateId", "covariateValue")
-
-populationRef <- bind_rows(demographicsRef, measurementRef)
-populationAnalysis <- bind_rows(demographicsAnalysis, measurementAnalysis)
-
-buildPopulationPLPData <- function(selectedRowIds) {
+buildPopulationPLPData <- function(selectedRowIds, includeFolds = FALSE) {
   selectedRowIds <- sort(unique(selectedRowIds))
-  
-  studyLabels <- data.frame(rowId = selectedRowIds)
-  studyFolds <- data.frame(rowId = selectedRowIds, index = 1L)
-  
-  populationCovariates <- bind_rows(
-    demographicsCovariateValues %>%
-      filter(.data$rowId %in% selectedRowIds),
-    measurementCovariateValues %>%
-      filter(.data$rowId %in% selectedRowIds)
-  )
   
   finalPopulation <- populationSubset(population, selectedRowIds)
   
+  analysisCovariates <- bind_rows(
+    demographicsCovariateValues %>% filter(.data$rowId %in% selectedRowIds), 
+    measurementCovariateValues %>% filter(.data$rowId %in% selectedRowIds)
+  )
+  
+  folds <- NULL
+  if (includeFolds) {
+    folds <- data.frame(
+      rowId = selectedRowIds,
+      index=1L
+    )
+  }
+  
   list(
     plpData = plpDataHelper(
-      labels = studyLabels,
-      folds = studyFolds,
-      covariates = populationCovariates,
-      covariateRef = populationRef,
-      analysisRef = populationAnalysis
-    ),
-    population = finalPopulation
+      labels = finalPopulation, 
+      folds = folds, 
+      covariates = analysisCovariates, 
+      covariateRef = analysisCovariateRef, 
+      analysisRef = analysisCovariateAnalysis
+    ), population = finalPopulation
   )
 }
 
-# Full analysis data: all subjects in the PLP population
+################################################################################
+# Build full and BP-complete analysis datasets
+################################################################################
 buildPopulation <- buildPopulationPLPData(populationRowIds)
 fullPopulationPLPData <- buildPopulation$plpData
 fullPopulation <- buildPopulation$population
 
-
-################################################################################
-# Use Systolic Blood Pressure to filter the dataset on patients with Systolic 
-# Blood Pressure observed
-################################################################################
-# Find systolic blood pressure covariate extracted by FeatureExtraction
-bpCovariateIds <- measurementRef %>%
-  filter(.data$conceptId == 3004249) %>%
-  pull(.data$covariateId) %>%
-  unique()
-
-
-bpCovariateId <- bpCovariateIds[[1]]
-
-# Complete-case analysis data: patients with observed systolic blood pressure
 bpCompleteCaseRowIds <- measurementCovariateValues %>%
   filter(.data$covariateId == bpCovariateId) %>%
-  distinct(.data$rowId) %>%
-  pull(.data$rowId) %>%
+  distinct(rowId) %>%
+  pull(rowId) %>%
   sort()
 
 buildPopulationComplete <- buildPopulationPLPData(bpCompleteCaseRowIds)
 completePopulationPLPData <- buildPopulationComplete$plpData
 completePopulation <- buildPopulationComplete$population
+
 
 ################################################################################
 # Missing data mechanism functions
@@ -333,6 +345,12 @@ completePopulation <- buildPopulationComplete$population
 #   with different missing data mechanisms (use Ampute as inspiration, but apply to long format data)
 # 
 ################################################################################
+
+
+
+
+
+
 
 
 ################################################################################
@@ -760,6 +778,26 @@ univariateMissingness$droppedPairs %>%
   dplyr::count(.data$patternId, .data$covariateId)
 
 
+
+# Define nr simulations
+# In each simulation: runMissingnessSimulation for all 3 mechanisms and all missingness ratios
+# This results in multiple datasets per simulation run
+# Then take each dataset with simulated missingness: 
+# First split into test and training set
+# On the training set
+# - Complete case analysis
+# - mean/median imputation (with and without missingness indicator)
+# - ICE + PMM (with and without missingness indicator)
+# - PMM (with and without missingness indicator)
+# - RF imputation (with and without indicator)
+
+
+
+
+
+
+
+
 ################################################################################
 # Test calling PLP imputation methods
 # TO DO:
@@ -768,42 +806,58 @@ univariateMissingness$droppedPairs %>%
 # Build loop/function over all possible imputation techniques (including with and without
 # missingness indicator)
 ################################################################################
-plpImputationMethods <- list(
-  simpleMean = PatientLevelPrediction::createSimpleImputer(
-    method = "mean",
-    missingThreshold = 0.95,
-    addMissingIndicator = FALSE
-  ),
-  simpleMedian = PatientLevelPrediction::createSimpleImputer(
-    method = "median",
-    missingThreshold = 0.95,
-    addMissingIndicator = FALSE
-  ),
-  iterativePMM = PatientLevelPrediction::createIterativeImputer(
-    missingThreshold = 0.95,
-    method = "pmm",
-    methodSettings = list(
-      pmm = list(
-        k = 5,
-        iterations = 5,
-        alpha = 1
+createPLPImputationMethods <- function(includeMissingIndicator = c(FALSE, TRUE)) {
+  methods <- list()
+  
+  for (addIndicator in includeMissingIndicator) {
+    suffix <- if (addIndicator) "_withIndicator" else "_noIndicator"
+    
+    methods[[paste0("simpleMean", suffix)]] <-
+      PatientLevelPrediction::createSimpleImputer(
+        method = "mean",
+        missingThreshold = 0.95,
+        addMissingIndicator = addIndicator
       )
-    ),
-    addMissingIndicator = FALSE
-  )
-)
-
-if ("createSklearnIterativeImputer" %in% getNamespaceExports("PatientLevelPrediction")) {
-  plpImputationMethods$sklearn_iterative <- PatientLevelPrediction::createSklearnIterativeImputer(
-    missingThreshold = 0.95,
-    methodSettings = list(
-      maxIter = 10,
-      initialStrategy = "mean",
-      randomState = 432
-    ),
-    addMissingIndicator = FALSE
-  )
+    
+    methods[[paste0("simpleMedian", suffix)]] <-
+      PatientLevelPrediction::createSimpleImputer(
+        method = "median",
+        missingThreshold = 0.95,
+        addMissingIndicator = addIndicator
+      )
+    
+    methods[[paste0("iterativePMM", suffix)]] <-
+      PatientLevelPrediction::createIterativeImputer(
+        missingThreshold = 0.95,
+        method = "pmm",
+        methodSettings = list(
+          pmm = list(
+            k = 5,
+            iterations = 5,
+            alpha = 1
+          )
+        ),
+        addMissingIndicator = addIndicator
+      )
+    
+    if ("createSklearnIterativeImputer" %in% getNamespaceExports("PatientLevelPrediction")) {
+      methods[[paste0("sklearnIterative", suffix)]] <-
+        PatientLevelPrediction::createSklearnIterativeImputer(
+          missingThreshold = 0.95,
+          methodSettings = list(
+            maxIter = 10,
+            initialStrategy = "mean",
+            randomState = 432
+          ),
+          addMissingIndicator = addIndicator
+        )
+    }
+  }
+  
+  methods
 }
+
+plpImputationMethods <- createPLPImputationMethods()
 
 # This is to work around the error of imputation functions using `||`, which doesn't work with dplyr::filter??
 getPLPImputer <- function(funName) {
@@ -822,25 +876,256 @@ getPLPImputer <- function(funName) {
   imputerFun
 }
 
-runPLPImputer <- function(plpData, imputerSettings) {
-  imputerFun <- getPLPImputer(attr(imputerSettings, "fun"))
+# runPLPImputer <- function(plpData, imputerSettings) {
+#   imputerFun <- getPLPImputer(attr(imputerSettings, "fun"))
+#   
+#   imputerFun(
+#     trainData = plpData,
+#     featureEngineeringSettings = imputerSettings,
+#     done = FALSE
+#   )
+# }
+
+runPLPImputers <- function(trainData,
+                           testData = NULL,
+                           imputationMethods,
+                           imputationOverview = plpImputationMethods) {
+  if (missing(imputationMethods) || length(imputationMethods) == 0) {
+    stop("Provide at least one imputation name.")
+  }
   
-  imputerFun(
-    trainData = plpData,
-    featureEngineeringSettings = imputerSettings,
-    done = FALSE
+  unknownMethods <- setdiff(imputationMethods, names(imputationOverview))
+  if (length(unknownMethods) > 0) {
+    stop(
+      "Unknown imputation method(s): ",
+      paste(unknownMethods, collapse = ", ")
+    )
+  }
+  
+  results <- lapply(imputationMethods, function(methodName) {
+    imputerSettings <- imputationOverview[[methodName]]
+    funName <- attr(imputerSettings, "fun")
+    imputerFun <- getPLPImputer(funName)
+    
+    # fit on train
+    trainImputed <- imputerFun(
+      trainData = trainData,
+      featureEngineeringSettings = imputerSettings,
+      done = FALSE
+    )
+    
+    fittedSettings <- getFittedPLPImputerSettings(
+      imputedTrainData = trainImputed,
+      imputerSettings = imputerSettings
+    )
+    
+    # apply to test if supplied
+    testImputed <- NULL
+    if (!is.null(testData)) {
+      testImputed <- imputerFun(
+        trainData = testData,
+        featureEngineeringSettings = fittedSettings,
+        done = TRUE
+      )
+    }
+    
+    list(
+      methodName = methodName,
+      functionName = funName,
+      originalSettings = imputerSettings,
+      fittedSettings = fittedSettings,
+      trainImputed = trainImputed,
+      testImputed = testImputed
+    )
+  })
+  
+  names(results) <- imputationMethods
+  results
+}
+
+getPLPImputationMetaKey <- function(funName) {
+  switch(
+    funName,
+    simpleImpute = "simpleImputer",
+    iterativeImpute = "iterativeImputer",
+    sklearnIterativeImpute = "sklearnIterativeImputer",
+    stop("Unknown PLP imputation function: ", funName)
   )
 }
 
-# Example: impute the MCAR dataset using mean imputation.
-bpMCARMeanImputer <- runPLPImputer(
-  plpData = bpMCAR40,
-  imputerSettings = plpImputationMethods$simpleMean
+getFittedPLPImputerSettings <- function(imputedTrainData, imputerSettings) {
+  funName <- attr(imputerSettings, "fun")
+  metaKey <- getPLPImputationMetaKey(funName)
+  
+  attr(imputedTrainData$covariateData, "metaData")$
+    featureEngineering[[metaKey]]$settings$featureEngineeringSettings
+}
+
+################################################################################
+# Prediction models
+
+
+################################################################################
+plpPredictionModels <- list(
+  lasso = PatientLevelPrediction::setLassoLogisticRegression(seed = 12),
+  xgboost = PatientLevelPrediction::setGradientBoostingMachine(seed = 12)
+  # ... add DL model
 )
 
-# Example: impute the MAR dataset using iterative PMM.
-bpMARPMMImputer <- runPLPImputer(
-  plpData = bpMAR40,
-  imputerSettings = plpImputationMethods$iterativePMM
-)
+runPlpModels <- function(
+    imputationResults, 
+    modelOverview = plpPredictionModels, 
+    preprocessSettings  = PatientLevelPrediction::createPreprocessSettings(
+      minFraction = 0.001, 
+      normalize = TRUE, 
+      removeRedundancy = TRUE
+    ), 
+    hyperparameterSettings = PatientLevelPrediction::createHyperparameterSettings(),
+    analysisPrefix = "sim", 
+    analysisPath = tempdir()) {
+  results <- list()
+  index <- 1
+  
+  for (imputation in names(imputationResults)) {
+    imputationResult <- imputationResults[[imputation]]
+    
+    for (predModel in names(modelOverview)) {
+      trainData <- imputationResult$trainImputed
+      testData <- imputationResult$testImputed
+      
+      trainData$covariateData <- PatientLevelPrediction::preprocessData(
+        covariateData = trainData$covariateData, 
+        preprocessSettings = preprocessSettings
+      )
+      
+      model <- PatientLevelPrediction::fitPlp(
+        trainData = trainData,
+        modelSettings = modelOverview[[predModel]],
+        hyperparameterSettings = hyperparameterSettings, 
+        analysisId = paste0(analysisPrefix, "_", imputation, "_", predModel),
+        analysisPath = analysisPath
+      )
+      
+      predictionTrain <- model$prediction
+      predictionTest <- PatientLevelPrediction::predictPlp(
+        plpModel = model, 
+        plpData = testData, 
+        population = testData$labels
+      )
+       # Continue here
+      
+    }
+  }
+}
+
+
+
+
+
+
+
+
+################################################################################
+# Run the simulation
+
+
+################################################################################
+runMissingnessSimulation <- function(data,
+                                     population, 
+                                     targetCovariateId, 
+                                     causeCovariateIds = NULL, 
+                                     mechanisms = c("MCAR", "MAR", "MNAR"), 
+                                     missingnessRatios = seq(0, 0.9, by = 0.1), 
+                                     typePerMech = list(MAR = "RIGHT", MNAR = "RIGHT"), 
+                                     imputationOverview = plpImputationMethods,
+                                     runs = 10,
+                                     
+                                     seed = 123) {
+  results <- list()
+  count <- 1
+  
+  for (simulation in seq_len(runs)) {
+    cat("Simulation: ", simulation, "\n")
+    
+    splitSettings <- createDefaultSplitSetting(
+      testFraction = 0.25, 
+      trainFraction = 0.75, 
+      nfold = 3,
+      splitSeed = seed + count,
+      type = "stratified"
+    )
+    
+    splitPlpData <- splitData(
+      plpData = data, 
+      population = population, 
+      splitSettings = splitSettings
+    )
+    
+    trainData <- splitPlpData$Train
+    testData <- splitPlpData$Test
+    
+    
+    for (mech in mechanisms) {
+      for (ratio in missingnessRatios) {
+        type <- typePerMech[[mech]]
+        if (is.null(type)) {
+          type <- "RIGHT"
+        }
+        
+        
+        
+        pattern <- switch(mech, 
+                          "MCAR" = list(targetCovariateIds = targetCovariateId, mechanism = "MCAR"), 
+                          "MAR" = list(targetCovariateIds = targetCovariateId, causeCovariateIds = causeCovariateIds, 
+                                       mechanism = "MAR", type = type), 
+                          "MNAR" = list(targetCovariateIds = targetCovariateId, causeCovariateIds = targetCovariateId, 
+                                        mechanism = "MNAR", type = type))
+        
+        simulateTrain <- simulateMultivariateMissingness(
+          data = trainData, 
+          patterns = list(pattern), 
+          ratio = ratio, 
+          seed = seed+count
+        )
+        
+        simulateTest <- simulateMultivariateMissingness(
+          data = testData, 
+          patterns = list(pattern), 
+          ratio = ratio,
+          seed = seed + count + 10000
+        )
+        
+        trainMissingData <- simulateTrain$plpData
+        testMissingData <- simulateTest$plpData
+        
+        imputationResults <- runPLPImputers(
+          trainData = trainMissingData,
+          testData = testMissingData,
+          imputationMethods = c("simpleMean_noIndicator","simpleMean_withIndicator", 
+                                "simpleMedian_noIndicator", "simpleMedian_withIndicator", 
+                                "iterativePMM_noIndicator", "iterativePMM_withIndicator"),
+          imputationOverview
+        )
+        
+        
+        results[[count]] <- list(
+          simulation = simulation,
+          mechanism = mech,
+          ratio = ratio,
+          type = type,
+          trainMissingSummary = simulateTrain$patternSummary,
+          testMissingSummary = simulateTest$patternSummary,
+          imputationResults = imputationResults,
+          modelResults = modelResults
+        )
+        
+        count <- count + 1
+      }
+    }
+    results
+    
+  }
+  
+  
+}
 
