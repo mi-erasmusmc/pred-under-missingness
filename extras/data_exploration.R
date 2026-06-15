@@ -1,4 +1,6 @@
+################################################################################
 # Libraries
+################################################################################
 library(DatabaseConnector)
 library(CirceR)
 library(readr)
@@ -12,12 +14,37 @@ library(scales)
 library(VIM)
 library(corrplot)
 library(stringr)
+library(paletteer)
+
+################################################################################
+# Specify paths
+################################################################################
+serverPath <- "C:\\Users\\maud5\\Documents\\database-1M_filtered.duckdb"
+codePath <- "C:\\Users\\maud5\\OneDrive\\MSc 2025-2026\\Thesis applications\\Code\\"
+figuresPath <- "C:\\Users\\maud5\\OneDrive\\MSc 2025-2026\\Thesis applications\\Plots\\"
+
+dir.create(
+  figuresPath,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+targetJson <- file.path(
+  codePath,
+  "target_cohort_mace_age40_79_strict.json"
+)
+
+outcomeJson <- file.path(
+  codePath,
+  "outcome_cohort_mace 1.json"
+)
+
 ################################################################################
 # Connect to database
 ################################################################################
 connectionDetails <- DatabaseConnector::createConnectionDetails(
   dbms = "duckdb",
-  server = "C:\\Users\\maud5\\Documents\\database-1M_filtered.duckdb"
+  server = serverPath
 )
 
 connection <- DatabaseConnector::connect(connectionDetails)
@@ -26,14 +53,15 @@ connection <- DatabaseConnector::connect(connectionDetails)
 # Generate target and outcome cohorts
 ################################################################################
 buildAndExecuteCohort <- function(connection,
-                                     jsonPath,
-                                     cohortId,
-                                     cdmSchema = "main",
-                                     vocabularySchema = "main",
-                                     cohortSchema = "main",
-                                     cohortTable = "cohort") {
+                                  jsonPath,
+                                  cohortId,
+                                  cdmSchema = "main",
+                                  vocabularySchema = "main",
+                                  cohortSchema = "main",
+                                  cohortTable = "cohort") {
   cohortJSON <- readr::read_file(jsonPath)
   cohortExpression <- CirceR::cohortExpressionFromJson(cohortJSON)
+  
   cohortSQL <- CirceR::buildCohortQuery(
     expression = cohortExpression,
     options = CirceR::createGenerateOptions()
@@ -58,13 +86,13 @@ buildAndExecuteCohort <- function(connection,
 
 buildAndExecuteCohort(
   connection = connection,
-  jsonPath = "C:\\Users\\maud5\\OneDrive\\MSc 2025-2026\\Thesis applications\\Code\\target_cohort_mace_age40_79_strict.json",
+  jsonPath = targetJson,
   cohortId = 1
 )
 
 buildAndExecuteCohort(
   connection = connection,
-  jsonPath = "C:\\Users\\maud5\\OneDrive\\MSc 2025-2026\\Thesis applications\\Code\\outcome_cohort_mace 1.json",
+  jsonPath = outcomeJson,
   cohortId = 2
 )
 
@@ -75,39 +103,15 @@ cdmDbSchema <- "main"
 cohortsDbSchema <- "main"
 cohortsDbTable <- "cohort"
 
-measurementConceptIds <- c(
-  3004249, # Systolic Blood Pressure
-  3038553, # BMI
-  3027114, # Total cholesterol
-  3007070, # HDL cholesterol
-  3009966  # LDL cholesterol
-)
-
-baseCovariateSettings <- FeatureExtraction::createCovariateSettings(
+covariateSettings <- FeatureExtraction::createCovariateSettings(
   useDemographicsGender = TRUE,
   useDemographicsAge = TRUE,
   useDemographicsAgeGroup = TRUE,
-  useDemographicsEthnicity = TRUE,
-  useDemographicsRace = TRUE,
-  useConditionOccurrenceAnyTimePrior = TRUE,
-  useDrugExposureAnyTimePrior = TRUE,
-  useDeviceExposureAnyTimePrior = TRUE,
-  useProcedureOccurrenceAnyTimePrior = TRUE,
-  useMeasurementAnyTimePrior = FALSE,
-  useMeasurementValueAnyTimePrior = FALSE,
-  useObservationAnyTimePrior = TRUE
-)
-
-measurementValueSettings <- FeatureExtraction::createCovariateSettings(
-  useMeasurementValueAnyTimePrior = TRUE,
-  includedCovariateConceptIds = measurementConceptIds,
-  addDescendantsToInclude = FALSE
-)
-
-
-covariateSettings <- list(
-  baseCovariateSettings,
-  measurementValueSettings
+  useConditionOccurrenceLongTerm = TRUE,
+  useDrugExposureLongTerm = TRUE,
+  useMeasurementValueLongTerm = TRUE,
+  longTermStartDays = -365,
+  endDays = 0
 )
 
 databaseDetails <- PatientLevelPrediction::createDatabaseDetails(
@@ -123,7 +127,6 @@ databaseDetails <- PatientLevelPrediction::createDatabaseDetails(
   cdmVersion = 5
 )
 
-# Can use this to restrict the sample size
 restrictPlpDataSettings <- PatientLevelPrediction::createRestrictPlpDataSettings()
 
 plpData <- PatientLevelPrediction::getPlpData(
@@ -133,7 +136,7 @@ plpData <- PatientLevelPrediction::getPlpData(
 )
 
 ################################################################################
-# Create population
+# Create study population
 ################################################################################
 populationSettings <- PatientLevelPrediction::createStudyPopulationSettings(
   binary = TRUE,
@@ -157,65 +160,71 @@ population <- PatientLevelPrediction::createStudyPopulation(
 )
 
 populationRowIds <- population$rowId
+
 covariateAnalysis <- plpData$covariateData$analysisRef %>% collect()
 covariateRef <- plpData$covariateData$covariateRef %>% collect()
 
 covariatePopulation <- plpData$covariateData$covariates %>%
-  filter(.data$rowId %in% !!populationRowIds) %>%
+  filter(.data$rowId %in% populationRowIds) %>%
   collect()
 
-# PLP demographic covariates
+################################################################################
+# Keep only age, age group, gender, and the five measurements
+################################################################################
+measurementConceptIds <- c(
+  3004249, # Systolic Blood Pressure
+  3038553, # BMI
+  3027114, # Total cholesterol
+  3007070, # HDL cholesterol
+  3009966  # LDL cholesterol
+)
+
+measurementConceptLabels <- c(
+  "3004249" = "Systolic BP",
+  "3038553" = "BMI",
+  "3027114" = "Total Cholesterol",
+  "3007070" = "HDL",
+  "3009966" = "LDL"
+)
+
+bpConceptId <- 3004249
+
 demographicCovariateIds <- c(
   8003, 9003, 10003, 11003, 12003, 13003, 14003, 15003, # Age group
   1002, # Age
-  8507001, 8532001, # Gender
-  38003564005, 38003563005, # Ethnicity
-  8516004, 8515004, 8527004 # Race
+  8507001, 8532001 # Gender
 )
 
-# Helper functions for PLP long-format data
-plpDataHelper <- function(labels,
-                            folds,
-                            covariates,
-                            covariateRef,
-                            analysisRef,
-                            templatePLPData = plpData) {
-  covariateData <- Andromeda::andromeda(
-    covariates = covariates,
-    covariateRef = covariateRef,
-    analysisRef = analysisRef
+demographicCategories <- covariatePopulation %>%
+  filter(covariateId %in% demographicCovariateIds) %>%
+  left_join(
+    covariateRef %>% select(covariateId, covariateName),
+    by = "covariateId"
+  ) %>%
+  mutate(
+    genderCat = case_when(
+      covariateId == 8507001 ~ "Male",
+      covariateId == 8532001 ~ "Female",
+      TRUE ~ NA_character_
+    ),
+    ageGroupCat = case_when(
+      covariateId == 8003 ~ "40-44",
+      covariateId == 9003 ~ "45-49",
+      covariateId == 10003 ~ "50-54",
+      covariateId == 11003 ~ "55-59",
+      covariateId == 12003 ~ "60-64",
+      covariateId == 13003 ~ "65-69",
+      covariateId == 14003 ~ "70-74",
+      covariateId == 15003 ~ "75-79",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  group_by(rowId) %>%
+  summarise(
+    genderCat = first(na.omit(genderCat)),
+    ageGroupCat = first(na.omit(ageGroupCat)),
+    .groups = "drop"
   )
-  
-  class(covariateData) <- "CovariateData"
-  attr(covariateData, "metaData") <- attr(templatePLPData$covariateData, "metaData")
-  
-  plpData <- list(
-    labels = labels,
-    folds = folds,
-    covariateData = covariateData
-  )
-  
-  class(plpData) <- "plpData"
-  attr(plpData, "metaData") <- attr(templatePLPData, "metaData")
-  
-  plpData
-}
-
-# To get population subset from PLPData 
-populationSubset <- function(population, selectedRowIds) {
-  filteredPopulation <- population %>%
-    filter(.data$rowId %in% selectedRowIds)
-  
-  attr(filteredPopulation, "metaData") <- attr(population, "metaData")
-  filteredPopulation
-}
-
-################################################################################
-# Build clean analysis PLP data
-################################################################################
-demographicsCovariateValues <- covariatePopulation %>%
-  filter(.data$covariateId %in% demographicCovariateIds) %>%
-  select("rowId", "covariateId", "covariateValue")
 
 demographicsRef <- covariateRef %>%
   filter(.data$covariateId %in% demographicCovariateIds)
@@ -223,96 +232,139 @@ demographicsRef <- covariateRef %>%
 demographicsAnalysis <- covariateAnalysis %>%
   semi_join(demographicsRef, by = "analysisId")
 
+demographicsCovariateValues <- covariatePopulation %>%
+  filter(.data$covariateId %in% demographicCovariateIds) %>%
+  select(rowId, covariateId, covariateValue)
+
 measurementRef <- covariateRef %>%
   filter(
-    .data$analysisId == 705,
+    !is.na(.data$conceptId),
     .data$conceptId %in% measurementConceptIds
-  )
+  ) %>%
+  distinct(covariateId, .keep_all = TRUE)
 
 measurementAnalysis <- covariateAnalysis %>%
   semi_join(measurementRef, by = "analysisId")
 
 measurementCovariateValues <- covariatePopulation %>%
   filter(.data$covariateId %in% measurementRef$covariateId) %>%
-  select("rowId", "covariateId", "covariateValue")
+  select(rowId, covariateId, covariateValue)
 
-populationRef <- bind_rows(demographicsRef, measurementRef)
-populationAnalysis <- bind_rows(demographicsAnalysis, measurementAnalysis)
+analysisCovariateRef <- bind_rows(demographicsRef, measurementRef)
+analysisCovariateAnalysis <- bind_rows(demographicsAnalysis, measurementAnalysis)
 
-buildPopulationPLPData <- function(selectedRowIds) {
-  selectedRowIds <- sort(unique(selectedRowIds))
-  
-  studyLabels <- data.frame(rowId = selectedRowIds)
-  studyFolds <- data.frame(rowId = selectedRowIds, index = 1L)
-  
-  populationCovariates <- bind_rows(
-    demographicsCovariateValues %>%
-      filter(.data$rowId %in% selectedRowIds),
-    measurementCovariateValues %>%
-      filter(.data$rowId %in% selectedRowIds)
+################################################################################
+# Helper functions
+################################################################################
+plpDataHelper <- function(labels,
+                          folds = NULL,
+                          covariates,
+                          covariateRef,
+                          analysisRef,
+                          templatePLPData = plpData) {
+  covariateData <- Andromeda::andromeda(
+    covariates = covariates,
+    covariateRef = covariateRef,
+    analysisRef = analysisRef
   )
+  
+  class(covariateData) <- "CovariateData"
+  attr(class(covariateData), "package") <- "FeatureExtraction"
+  attr(covariateData, "metaData") <- attr(templatePLPData$covariateData, "metaData")
+  
+  plpDataOut <- list(
+    labels = labels,
+    covariateData = covariateData,
+    metaData = templatePLPData$metaData
+  )
+  
+  if (!is.null(folds)) {
+    plpDataOut$folds <- folds
+  }
+  
+  class(plpDataOut) <- "plpData"
+  plpDataOut
+}
+
+populationSubset <- function(population, selectedRowIds) {
+  filteredPopulation <- population %>%
+    dplyr::filter(.data$rowId %in% selectedRowIds)
+  
+  attr(filteredPopulation, "metaData") <- attr(population, "metaData")
+  filteredPopulation
+}
+
+buildPopulationPLPData <- function(selectedRowIds, includeFolds = FALSE) {
+  selectedRowIds <- sort(unique(selectedRowIds))
   
   finalPopulation <- populationSubset(population, selectedRowIds)
   
+  analysisCovariates <- bind_rows(
+    demographicsCovariateValues %>% filter(.data$rowId %in% selectedRowIds), 
+    measurementCovariateValues %>% filter(.data$rowId %in% selectedRowIds)
+  )
+  
+  folds <- NULL
+  if (includeFolds) {
+    folds <- data.frame(
+      rowId = selectedRowIds,
+      index=1L
+    )
+  }
+  
   list(
     plpData = plpDataHelper(
-      labels = studyLabels,
-      folds = studyFolds,
-      covariates = populationCovariates,
-      covariateRef = populationRef,
-      analysisRef = populationAnalysis
-    ),
-    population = finalPopulation
+      labels = finalPopulation, 
+      folds = folds, 
+      covariates = analysisCovariates, 
+      covariateRef = analysisCovariateRef, 
+      analysisRef = analysisCovariateAnalysis
+    ), population = finalPopulation
   )
 }
 
-# Full analysis data: all subjects in the PLP population.
+################################################################################
+# Build full and complete-case datasets
+################################################################################
 buildPopulation <- buildPopulationPLPData(populationRowIds)
 fullPopulationPLPData <- buildPopulation$plpData
 fullPopulation <- buildPopulation$population
 
-# Identify the systolic blood pressure covariate extracted by FeatureExtraction.
-bpCovariateIds <- measurementRef %>%
-  filter(.data$conceptId == 3004249) %>%
+# Extract bp covariate id
+bpCovariateId <- measurementRef %>%
+  filter(.data$conceptId == bpConceptId) %>%
   pull(.data$covariateId) %>%
   unique()
 
-bpCovariateId <- bpCovariateIds[[1]]
-
-# BP complete-case analysis data: subjects with observed blood pressure at baseline.
 bpCompleteCaseRowIds <- measurementCovariateValues %>%
   filter(.data$covariateId == bpCovariateId) %>%
-  distinct(.data$rowId) %>%
-  pull(.data$rowId) %>%
+  distinct(rowId) %>%
+  pull(rowId) %>%
   sort()
 
 buildPopulationCompleteBp <- buildPopulationPLPData(bpCompleteCaseRowIds)
 completePopulationBpPLPData <- buildPopulationCompleteBp$plpData
 completePopulationBp <- buildPopulationCompleteBp$population
 
-# Complete case on all five measurements
-allCompleteCaseRowIds <- measurementCovariateValues %>% 
-  filter(.data$covariateId %in% measurementRef$covariateId) %>%
-  distinct(rowId, covariateId) %>% 
-  count(rowId, name="nrMeasurementsObserved") %>% 
-  filter(nrMeasurementsObserved == length(unique(measurementRef$covariateId))) %>%
-  pull(rowId) %>%
-  sort()
+# allCompleteCaseRowIds <- measurementCovariateValues %>%
+#   filter(.data$covariateId %in% measurementRef$covariateId) %>%
+#   distinct(rowId, covariateId) %>%
+#   count(rowId, name = "nrMeasurementsObserved") %>%
+#   filter(.data$nrMeasurementsObserved == length(unique(measurementRef$covariateId))) %>%
+#   pull(rowId) %>%
+#   sort()
+# 
+# buildPopulationCompleteAll <- buildPopulationPLPData(allCompleteCaseRowIds)
+# completePopulationAllPLPData <- buildPopulationCompleteAll$plpData
+# completePopulationAll <- buildPopulationCompleteAll$population
 
-buildPopulationCompleteAll <- buildPopulationPLPData(allCompleteCaseRowIds)
-completePopulationAllPLPData <- buildPopulationCompleteAll$plpData
-completePopulationAll <- buildPopulationCompleteAll$population
-
-# Covariate data
 populationCovData <- fullPopulationPLPData$covariateData
 completePopulationBpCovData <- completePopulationBpPLPData$covariateData
-completePopulationAllCovData <- completePopulationAllPLPData$covariateData
+#completePopulationAllCovData <- completePopulationAllPLPData$covariateData
 
 ################################################################################
-# Try table one from Feature Extraction package
-
+# Table 1
 ################################################################################
-# Full data
 aggregatedTabOneCovData <- FeatureExtraction::aggregateCovariates(populationCovData)
 tableOne <- FeatureExtraction::createTable1(
   aggregatedTabOneCovData,
@@ -321,153 +373,161 @@ tableOne <- FeatureExtraction::createTable1(
   showPercent = TRUE
 )
 
-# Complete on Blood Pressure
 aggregatedTabOneCovDataCompleteBp <- FeatureExtraction::aggregateCovariates(completePopulationBpCovData)
 tableOneCompleteBp <- FeatureExtraction::createTable1(
   aggregatedTabOneCovDataCompleteBp,
-  output="one column",
+  output = "one column",
   showCounts = TRUE,
   showPercent = TRUE
 )
 
-# Complete on all five measurements
-aggregatedTabOneCovDataCompleteAll <- FeatureExtraction::aggregateCovariates(completePopulationAllCovData)
-tableOneCompleteAll <- FeatureExtraction::createTable1(
-  aggregatedTabOneCovDataCompleteAll,
-  output="one column",
-  showCounts = TRUE,
-  showPercent = TRUE
-)
+# aggregatedTabOneCovDataCompleteAll <- FeatureExtraction::aggregateCovariates(completePopulationAllCovData)
+# tableOneCompleteAll <- FeatureExtraction::createTable1(
+#   aggregatedTabOneCovDataCompleteAll,
+#   output = "one column",
+#   showCounts = TRUE,
+#   showPercent = TRUE
+# )
 
 ################################################################################
-# Plotting datasets: full population and BP complete-case population
+# Measurement summary table from covariatesContinuous
 ################################################################################
+measurementSummaryFull <- aggregatedTabOneCovData$covariatesContinuous %>%
+  collect() %>%
+  inner_join(
+    measurementRef %>%
+      select(covariateId, conceptId, covariateName),
+    by = "covariateId"
+  ) %>%
+  mutate(
+    conceptLabel = measurementConceptLabels[as.character(conceptId)]
+  ) %>%
+  select(
+    conceptId,
+    conceptLabel,
+    covariateId,
+    nObserved = countValue,
+    mean = averageValue,
+    sd = standardDeviation,
+    median = medianValue,
+    p25 = p25Value,
+    p75 = p75Value,
+    min = minValue,
+    max = maxValue
+  ) %>%
+  arrange(match(conceptId, measurementConceptIds))
 
-# Make wide data format to use for plotting
-makePlotData <- function(studyPLPData, finalPopulation) {
-  studyPLPData$covariateData$covariates %>%
+measurementSummaryCompleteBp <- aggregatedTabOneCovDataCompleteBp$covariatesContinuous %>%
+  collect() %>%
+  inner_join(
+    measurementRef %>%
+      select(covariateId, conceptId, covariateName),
+    by = "covariateId"
+  ) %>%
+  mutate(
+    conceptLabel = measurementConceptLabels[as.character(conceptId)]
+  ) %>%
+  select(
+    conceptId,
+    conceptLabel,
+    covariateId,
+    nObserved = countValue,
+    mean = averageValue,
+    sd = standardDeviation,
+    median = medianValue,
+    p25 = p25Value,
+    p75 = p75Value,
+    min = minValue,
+    max = maxValue
+  ) %>%
+  arrange(match(conceptId, measurementConceptIds))
+
+measurementSummaryFull
+measurementSummaryCompleteBp
+
+################################################################################
+# Plotting datasets
+################################################################################
+makePlotData <- function(data, finalPopulation) {
+  covariateLookup <- data$covariateData$covariateRef %>%
     collect() %>%
-    select(rowId, covariateId, covariateValue) %>%
+    transmute(
+      covariateId,
+      variableName = dplyr::coalesce(
+        unname(measurementConceptLabels[as.character(conceptId)]),
+        covariateName
+      )
+    )
+  
+  data$covariateData$covariates %>%
+    collect() %>%
+    inner_join(covariateLookup, by = "covariateId") %>%
+    group_by(rowId, variableName) %>%
+    summarise(
+      covariateValue = mean(covariateValue, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
     pivot_wider(
-      names_from = covariateId,
+      names_from = variableName,
       values_from = covariateValue
     ) %>%
     left_join(
       finalPopulation %>% select(rowId, subjectId),
       by = "rowId"
-    )
+    ) %>%
+    left_join(demographicCategories, by = "rowId")
 }
 
-plotDataFull <- makePlotData(
-  studyPLPData = fullPopulationPLPData,
-  finalPopulation = fullPopulation
+plotDataFull <- makePlotData(fullPopulationPLPData, fullPopulation)
+plotDataCompleteBp <- makePlotData(completePopulationBpPLPData, completePopulationBp)
+
+################################################################################
+# Plotting data
+################################################################################
+plotVariables <- c(
+  "rowId",
+  "subjectId",
+  "ageGroupCat",
+  "genderCat",
+  "age in years",
+  unname(measurementConceptLabels[as.character(measurementConceptIds)])
 )
 
-plotDataCompleteBp <- makePlotData(
-  studyPLPData = completePopulationBpPLPData,
-  finalPopulation = completePopulationBp
-)
-################################################################################
-# Create simplified demographic variables
-################################################################################
-
-addDemographicCategories <- function(data) {
-  data <- data %>% mutate(
-    genderCat = case_when(
-      !is.na(`8507001`) ~ "Male",
-      !is.na(`8532001`) ~ "Female",
-      TRUE ~ NA_character_
-    ),
-    
-    raceCat = case_when(
-      !is.na(`8516004`) ~ "Black/African American",
-      !is.na(`8515004`) ~ "Asian",
-      !is.na(`8527004`) ~ "White",
-      TRUE ~ NA_character_
-    ),
-    
-    ethnicityCat = case_when(
-      !is.na(`38003564005`) ~ "Non-Hispanic",
-      !is.na(`38003563005`) ~ "Hispanic",
-      TRUE ~ NA_character_
-    ),
-    ageGroupCat = case_when(
-      !is.na(`8003`)  ~ "40-44",
-      !is.na(`9003`)  ~ "45-49",
-      !is.na(`10003`) ~ "50-54",
-      !is.na(`11003`) ~ "55-59",
-      !is.na(`12003`) ~ "60-64",
-      !is.na(`13003`) ~ "65-69",
-      !is.na(`14003`) ~ "70-74",
-      !is.na(`15003`) ~ "75-79",
-      TRUE ~ NA_character_
-    )
-  )
-  data
-}
-
-plotDataFull <- addDemographicCategories(plotDataFull)
-plotDataCompleteBp <- addDemographicCategories(plotDataCompleteBp)
-
-################################################################################
-# VIM plotting datasets
-################################################################################
-
-ageCovariateId <- "1002"
-measurementIds <- as.character(measurementRef$covariateId)
-covariateLabels <- c(
-  "3027114840705" = "Total Cholesterol",
-  "3007070840705" = "HDL", 
-  "3009966840705" = "LDL",
-  "3038553531705" = "BMI",
-  "3004249876705" = "Systolic BP",
-  "age.in.years" = "Age in years",
-  "raceCat" = "Race",
-  "ageGroupCat" = "Age group",
-  "genderCat" = "Gender",
-  "ethnicityCat" = "Ethnicity"
-)
-
-makeVIMPlotData <- function(data) {
+makeAnalysisPlotData <- function(data) {
   data %>%
+    rename(
+      `Age group` = ageGroupCat,
+      Gender = genderCat,
+      `Age in years` = `age in years`
+    ) %>%
     select(
       rowId,
       subjectId,
-      ageGroupCat,
-      raceCat,
-      genderCat,
-      ethnicityCat,
-      any_of(measurementIds),
-      any_of(ageCovariateId)
-    ) %>%
-    rename(age.in.years = all_of(ageCovariateId))
+      `Age group`,
+      Gender,
+      `Age in years`,
+      all_of(unname(measurementConceptLabels[as.character(measurementConceptIds)]))
+    )
 }
 
-covariateRef %>%
-  filter(covariateId == 1002) %>%
-  select(covariateId, covariateName, analysisId)
+plotDataFullClean <- makeAnalysisPlotData(plotDataFull)
+plotDataCompleteBpClean <- makeAnalysisPlotData(plotDataCompleteBp)
 
-plotDataVimFull <- makeVIMPlotData(plotDataFull)
-plotDataVimCompleteBp <- makeVIMPlotData(plotDataCompleteBp)
+################################################################################
+# Missingness overview
+################################################################################
+png(
+  filename = file.path(figuresPath, "aggregation_plot.png"),
+  width = 8,
+  height = 6,
+  units = "in",
+  res = 300
+)
 
-plotDataVimFull <- plotDataVimFull %>%
-  rename_with(
-    ~ ifelse(.x %in% names(covariateLabels),
-             covariateLabels[.x],
-             .x)
-  )
-
-plotDataVimCompleteBp <- plotDataVimCompleteBp %>%
-  rename_with(
-    ~ ifelse(.x %in% names(covariateLabels),
-             covariateLabels[.x],
-             .x)
-  )
-
-# Aggregation plot to view general missingness proportions per variable + missingness occurence
 par(mar = c(12, 8, 2, 2))
+
 VIM::aggr(
-  plotDataVimFull,
+  plotDataFullClean,
   numbers = FALSE,
   prop = TRUE,
   sortVars = TRUE,
@@ -476,6 +536,8 @@ VIM::aggr(
   gap = 3
 )
 
+dev.off()
+
 measurementLabels <- c(
   "Systolic BP",
   "LDL",
@@ -483,22 +545,25 @@ measurementLabels <- c(
   "Total Cholesterol",
   "BMI"
 )
-measurementObserved <- rowSums(
-  !is.na(plotDataVimFull[measurementLabels])
-)
 
-# Number of observations with all five measures missing (90%)
+measurementObserved <- rowSums(!is.na(plotDataFullClean[measurementLabels]))
+
 allFiveMiss <- mean(measurementObserved == 0) * 100
-# Number of observations with at least one measure (9.7%)
 atLeastOneObs <- mean(measurementObserved >= 1) * 100
-# Number of observations with all five measures observed (0.003%)
 allFiveObs <- mean(measurementObserved == 5) * 100
 
-
-# Matrix plot
-subsetData <- plotDataVimFull[
+subsetData <- plotDataFullClean[
   measurementObserved > 0,
 ]
+
+
+png(
+  filename = file.path(figuresPath, "matrix_plot.png"),
+  width = 8,
+  height = 6,
+  units = "in",
+  res = 300
+)
 
 VIM::matrixplot(
   subsetData[measurementLabels],
@@ -506,17 +571,25 @@ VIM::matrixplot(
   interactive = FALSE
 )
 
-################################################################################
-# Demographic distributions in the full population, without filtering
+dev.off()
 
 ################################################################################
-# Age density
-ggplot(plotDataVimFull, aes(x = .data[["Age in years"]])) +
+# Demographic distributions in full population
+################################################################################
+ageDensity <- ggplot(plotDataFullClean, aes(x = .data[["Age in years"]])) +
   geom_density() +
   labs(
     title = "Age density",
-    x = "Age"
-  )
+    x = "Age",
+    y = "Density"
+  ) + theme_minimal()
+
+ggsave(
+  filename = file.path(figuresPath, "age_density.png"),
+  plot = ageDensity, 
+  width = 8,
+  height = 6, 
+  dpi = 300)
 
 plotPercentBar <- function(data, varName, title) {
   ggplot(data, aes(x = .data[[varName]])) +
@@ -527,31 +600,33 @@ plotPercentBar <- function(data, varName, title) {
       y = "Percentage",
       title = title
     ) +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) + theme_minimal()
 }
 
-# Age group distribution
-plotPercentBar(plotDataVimFull,"Age group","Age group distribution")
+ageDistr <- plotPercentBar(plotDataFullClean, "Age group", "Age group distribution")
+ggsave(
+  filename = file.path(figuresPath, "age_group_distribution.png"),
+  plot = ageDistr, 
+  width = 8,
+  height = 6, 
+  dpi = 300)
 
-# Gender distribution
-plotPercentBar(plotDataVimFull,"Gender","Gender distribution")
-
-# Race distribution
-plotPercentBar(plotDataVimFull,"Race","Race distribution")
-
-# Ethnicity distribution
-plotPercentBar(plotDataVimFull,"Ethnicity","Ethnicity distribution")
-
+genderDistr <- plotPercentBar(plotDataFullClean, "Gender", "Gender distribution")
+ggsave(
+  filename = file.path(figuresPath, "gender_distribution.png"),
+  plot =genderDistr, 
+  width = 8,
+  height = 6, 
+  dpi = 300)
 ################################################################################
-# Measurements distributions in the full population, without filtering
-
+# Measurement distributions in full population
 ################################################################################
 measurementPlotSpecifications <- list(
-  list(var = "Systolic BP",label = "Systolic BP",x_label = "Systolic Blood Pressure (mmHg)"),
+  list(var = "Systolic BP", label = "Systolic BP", x_label = "Systolic Blood Pressure (mmHg)"),
   list(var = "Total Cholesterol", label = "Total Cholesterol", x_label = "Total Cholesterol (mg/dL)"),
-  list(var = "HDL",label = "HDL", x_label = "HDL (mg/dL)"),
-  list(var = "LDL",label = "LDL",x_label = "LDL (mg/dL)"),
-  list(var = "BMI",label = "BMI",x_label = expression(BMI~(kg/m^2)))
+  list(var = "HDL", label = "HDL", x_label = "HDL (mg/dL)"),
+  list(var = "LDL", label = "LDL", x_label = "LDL (mg/dL)"),
+  list(var = "BMI", label = "BMI", x_label = expression(BMI~(kg/m^2)))
 )
 
 plotMeasurementDensity <- function(data, var, label, x_label) {
@@ -579,7 +654,7 @@ plotMeasurementHistogram <- function(data, var, label, x_label, bins = 30) {
 densityPlots <- purrr::map(
   measurementPlotSpecifications,
   ~ plotMeasurementDensity(
-    data = plotDataVimFull,
+    data = plotDataFullClean,
     var = .x$var,
     label = .x$label,
     x_label = .x$x_label
@@ -589,31 +664,68 @@ densityPlots <- purrr::map(
 histogramPlots <- purrr::map(
   measurementPlotSpecifications,
   ~ plotMeasurementHistogram(
-    data = plotDataVimFull,
+    data = plotDataFullClean,
     var = .x$var,
     label = .x$label,
     x_label = .x$x_label
   )
 )
 
-densityPlots
-histogramPlots
+purrr::walk2(
+  densityPlots,
+  measurementPlotSpecifications,
+  ~ ggsave(
+    filename = file.path(
+      figuresPath,
+      paste0(
+        "density_",
+        str_replace_all(tolower(.y$var), " ", "_"),
+        ".png"
+      )
+    ),
+    plot = .x,
+    width = 7,
+    height = 5,
+    dpi = 300
+  )
+)
 
+purrr::walk2(
+  histogramPlots,
+  measurementPlotSpecifications,
+  ~ ggsave(
+    filename = file.path(
+      figuresPath,
+      paste0(
+        "histogram_",
+        str_replace_all(tolower(.y$var), " ", "_"),
+        ".png"
+      )
+    ),
+    plot = .x,
+    width = 7,
+    height = 5,
+    dpi = 300
+  )
+)
 
 ################################################################################
 # Correlation plot
-# Note that in the synthetic data, this probably leads to unstable results, 
-# because each variable has 90% missingness and the correlation is based on
-# pairwise complete observations
 ################################################################################
-
-# Correlation plot
-corrData <- plotDataVimFull %>%
-  select("Age in years", all_of(measurementLabels))
+corrData <- plotDataFullClean %>%
+  select(`Age in years`, all_of(measurementLabels))
 
 corrMatrix <- cor(
   corrData,
   use = "pairwise.complete.obs"
+)
+
+png(
+  filename = file.path(figuresPath, "correlation_plot.png"),
+  width = 8,
+  height = 6,
+  units = "in",
+  res = 300
 )
 
 corrplot(
@@ -625,11 +737,15 @@ corrplot(
   number.cex = 0.7
 )
 
+dev.off()
+
 ################################################################################
-# Margin plots for each variable combination
+# Margin plots
 ################################################################################
-# Set path
-marginplotOutputPath <- "C:\\Users\\maud5\\OneDrive\\MSc 2025-2026\\Thesis applications\\Data Figures\\1M data\\test plots"
+marginplotOutputPath <- file.path(
+  figuresPath,
+  "Marginplots"
+)
 
 marginplotSpecs <- list(
   list(x = "Systolic BP", y = "Age in years", file_name = "01_bp_vs_age.png"),
@@ -652,18 +768,14 @@ if (!is.null(marginplotOutputPath)) {
   dir.create(marginplotOutputPath, recursive = TRUE, showWarnings = FALSE)
 }
 
-start <- Sys.time()
 runMarginplot <- function(spec,
                           data,
                           outputPath = NULL,
                           width = 1600,
                           height = 1600,
                           res = 150) {
-  
-  plotData <- data %>%
+  marginplotData <- data %>%
     select(all_of(c(spec$x, spec$y)))
-  
-  VIM::marginplot(plotData)
   
   if (!is.null(outputPath)) {
     grDevices::png(
@@ -673,56 +785,62 @@ runMarginplot <- function(spec,
       res = res
     )
     on.exit(grDevices::dev.off(), add = TRUE)
-    
-    VIM::marginplot(plotData)
+    VIM::marginplot(marginplotData)
+  } else {
+    VIM::marginplot(marginplotData)
   }
 }
+
+start <- Sys.time()
 
 invisible(lapply(
   marginplotSpecs,
   runMarginplot,
-  data = plotDataVimFull,
+  data = plotDataFullClean,
   outputPath = marginplotOutputPath
 ))
 
 end <- Sys.time()
-print(end-start) # approx 11 minutes
+print(end - start)
 
 ################################################################################
-# Comparison plots of complete blood pressure data and the full dataset
-
+# Comparison plots: full data vs BP complete case
 ################################################################################
-# Missing BP column
-plotDataVimFull <- plotDataVimFull %>%
+plotDataFullClean <- plotDataFullClean %>%
   mutate(bpMissing = is.na(.data[["Systolic BP"]]))
 
-# Age group distribution comparison plot
-ggplot(
-  plotDataVimFull,
+bpAgeGroupComparison <- ggplot(
+  plotDataFullClean,
   aes(x = .data[["Age group"]], fill = bpMissing)
 ) +
   geom_bar(position = "fill") +
   scale_y_continuous(labels = percent_format()) +
   scale_fill_manual(
     values = c(
-      "TRUE"= "#F5836E",
-      "FALSE" = "#B0F0F7"
+      "TRUE" = "#F89C74FF",
+      "FALSE" = "#9EB9F3FF"
     ),
     labels = c(
       "FALSE" = "Observed",
       "TRUE" = "Missing"
     )
-  ) + 
+  ) +
   labs(
     x = "Age group",
     y = "Percentage",
     fill = "Blood Pressure",
     title = "Blood Pressure Missingness by Age Group"
   ) +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + theme_minimal()
 
-# Summarize pct of missingness per age group + total nr of observations per age group
-plotDataVimFull %>%
+ggsave(
+  filename = file.path(figuresPath, "bp_missingness_per_age_group.png"),
+  plot =bpAgeGroupComparison, 
+  width = 8,
+  height = 6, 
+  dpi = 300)
+
+missingnessSummary <- plotDataFullClean %>%
   group_by(.data[["Age group"]]) %>%
   summarise(
     pctMissingBP = mean(is.na(.data[["Systolic BP"]])) * 100,
@@ -730,134 +848,71 @@ plotDataVimFull %>%
     .groups = "drop"
   )
 
-# BP: Full data vs complete case comparison
 dataCombined <- bind_rows(
-  plotDataVimFull %>%
-    mutate(sample = "Full data"),
-  plotDataVimCompleteBp %>%
-    mutate(sample = "Complete case")
+  plotDataFullClean %>% mutate(sample = "Full cohort"),
+  plotDataCompleteBpClean %>% mutate(sample = "Complete-case cohort")
 )
 
-# Age density
-ggplot(dataCombined,
-       aes(x = .data[["Age in years"]],
-           #color = sample,
-           fill = sample)) +
-  geom_density(alpha = 0.3) +
-  scale_fill_manual(
-    values = c(
-      "Full data" = "#D699E8",
-      "Complete case" = "#82EDC2"
-    ),
+ageDensityPlotComp <- ggplot(
+  dataCombined,
+  aes(x = .data[["Age in years"]], fill = sample)
+) +
+  geom_density(alpha = 0.5) +
+  paletteer::scale_fill_paletteer_d(
+    "rcartocolor::Pastel",
     labels = c(
-      "Full data" = "Full cohort",
-      "Complete case" = "Complete case (on blood pressure)"
+      "Full cohort" = "Full cohort",
+      "Complete-case cohort" = "Complete-case cohort (on blood pressure)"
     )
   ) +
   labs(
-    title = "Age density: full data vs complete case",
+    title = "Age density: full cohort vs complete-case cohort on blood pressure",
     x = "Age",
     y = "Density",
     fill = "Dataset"
-  ) + guides(color="none")
+  ) +
+  theme_minimal()
 
-# Age group density
-ggplot(dataCombined, aes(x = sample, fill = .data[["Age group"]])) +
+ggsave(
+  filename = file.path(figuresPath, "age_density_comparison_missing.png"),
+  plot =ageDensityPlotComp, 
+  width = 8,
+  height = 6, 
+  dpi = 300)
+
+ageGroupComparison <- ggplot(dataCombined, aes(x = sample, fill = .data[["Age group"]])) +
   geom_bar(position = "fill") +
   scale_y_continuous(labels = scales::percent_format()) +
-  scale_fill_manual(
-    values = c(
-      "40-44" = "#ED82AD",
-      "45-49" = "#F8B591",
-      "50-54" = "#E2ED82",
-      "55-59" = "#82EDC2",
-      "60-64" = "#82E2ED",
-      "65-69" = "#8D82ED",
-      "70-74" = "#EA9EE3",
-      "75-79" = "#E3C5FC"
-    )
-  ) +
+  scale_fill_paletteer_d("rcartocolor::Pastel") +
   labs(
     x = NULL,
     y = "Percentage within sample",
     fill = "Age group",
-    title = "Age group distribution: full data vs complete case"
-  )
+    title = "Age group distribution: full cohort vs complete-case cohort on blood pressure"
+  ) + theme_minimal()
 
-# Gender
-ggplot(dataCombined, aes(x = sample, fill = .data[["Gender"]])) +
+ggsave(
+  filename = file.path(figuresPath, "age_group_comparison_missing.png"),
+  plot =ageGroupComparison, 
+  width = 8,
+  height = 6, 
+  dpi = 300)
+
+genderComparison <- ggplot(dataCombined, aes(x = sample, fill = .data[["Gender"]])) +
   geom_bar(position = "fill") +
   scale_y_continuous(labels = scales::percent_format()) +
-  scale_fill_manual(
-    values = c(
-      "Female" = "#D699E8",
-      "Male" = "#82EDC2"
-    ),
-    na.value = "grey70"
-  ) +
+  scale_fill_paletteer_d("rcartocolor::Pastel") +
   labs(
     x = NULL,
     y = "Percentage within sample",
     fill = "Gender",
-    title = "Gender distribution: full data vs complete case"
-  )
+    title = "Gender distribution: full cohort vs complete-case cohort on blood pressure"
+  ) + theme_minimal()
 
-# Race
-ggplot(dataCombined, aes(x = sample, fill = .data[["Race"]])) +
-  geom_bar(position = "fill") +
-  scale_y_continuous(labels = scales::percent_format()) +
-  scale_fill_manual(
-    values = c(
-      "White" = "#82E2ED",
-      "Black/African American" = "#F8B591",
-      "Asian" = "#E3C5FC",
-      "NA" = "grey70"
-    ),
-    na.value = "grey70"
-  ) +
-  labs(
-    x = NULL,
-    y = "Percentage within sample",
-    fill = "Race",
-    title = "Race distribution: full data vs complete case"
-  )
-
-# Ethnicity
-ggplot(dataCombined, aes(x = sample, fill = .data[["Ethnicity"]])) +
-  geom_bar(position = "fill") +
-  scale_y_continuous(labels = scales::percent_format()) +
-  scale_fill_manual(
-    values = c(
-      "Hispanic" = "#82E2ED",
-      "Non-Hispanic" = "#F8B591"
-    ),
-    na.value = "grey70"
-  ) +
-  labs(
-    x = NULL,
-    y = "Percentage within sample",
-    fill = "Ethnicity",
-    title = "Ethnicity distribution: full data vs complete case"
-  )
-
-# Check complete case on BP
-# plotDataVimFull %>%
-#   group_by(.data[["Age group"]]) %>%
-#   summarise(
-#     pctObservedBP = mean(!(is.na(.data[["Systolic BP"]]))) * 100,
-#     totalObservedBP = sum(!(is.na(.data[["Systolic BP"]]))),
-#     n = n(),
-#     .groups = "drop"
-#   )
-# 
-# # Check complete case on all five measures
-# plotDataVimFull %>%
-#   group_by(.data[["Age group"]]) %>%
-#   summarise(
-#     pctCompleteAllFive = mean(
-#       rowSums(!is.na(across(all_of(measurementLabels)))) == 5
-#     ) * 100,
-#     n = n(),
-#     .groups = "drop"
-#   )
+ggsave(
+  filename = file.path(figuresPath, "gender_comparison.png"),
+  plot =genderComparison, 
+  width = 8,
+  height = 6, 
+  dpi = 300)
 
