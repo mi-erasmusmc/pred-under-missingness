@@ -32,7 +32,7 @@ library(FeatureExtraction)
 ################################################################################
 
 # set path
-source("/code/IPCI_connection.R")
+source("/code/connection_details.R")
 
 ################################################################################
 # Helper functions
