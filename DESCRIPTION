@@ -1,14 +1,30 @@
 Package: ImputationPackage
-Title: What the Package Does (One Line, Title Case)
+Title: Missingness Simulation Utilities for PLP Studies
 Version: 0.0.0.9000
-Authors@R: 
-    person("First", "Last", , "first.last@example.com", role = c("aut", "cre"))
-Description: What the package does (one paragraph).
+Authors@R:
+    person("Package", "Maintainer", email = "your.email@example.com", role = c("aut", "cre"))
+Description: Utilities for building cohorts, preparing PatientLevelPrediction
+    data, simulating missingness, running imputation strategies, and
+    evaluating predictive models for healthcare data.
 License: `use_mit_license()`, `use_gpl3_license()` or friends to pick a
     license
+Depends:
+    R (>= 4.2.0)
+Imports:
+    Andromeda,
+    CirceR,
+    DatabaseConnector,
+    dplyr,
+    magrittr,
+    PatientLevelPrediction,
+    readr,
+    rlang,
+    SqlRender,
+    tibble
+Suggests:
+    ggplot2,
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.2
-Suggests: 
-    testthat (>= 3.0.0)
-Config/testthat/edition: 3
