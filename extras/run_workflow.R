@@ -284,6 +284,15 @@ system.time({
 #   completeCase = TRUE,
 #   mechanisms = c("MCAR", "MAR", "MNAR"),
 #   missingnessRatios = seq(0, 0.8, by = 0.2),
+#   targetCovariateIdPerMech = list(
+#     MCAR = bpCovariateId,
+#     MAR = bpCovariateId,
+#     MNAR = cholCovariateId
+#   ),
+#   typePerMech = list(
+#     MAR = "LEFT",
+#     MNAR = "LEFT"
+#   ),
 #   imputationMethods = c(
 #     "simpleMean_noIndicator",
 #     "simpleMean_withIndicator",

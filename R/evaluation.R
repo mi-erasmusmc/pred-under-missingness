@@ -278,6 +278,64 @@ extractPatternIds <- function(patterns, field) {
   ids
 }
 
+resolvePerMechanismValue <- function(valuesPerMech, mech, defaultValue = NULL) {
+  if (is.null(valuesPerMech)) {
+    return(defaultValue)
+  }
+
+  value <- valuesPerMech[[mech]]
+
+  if (is.null(value)) {
+    return(defaultValue)
+  }
+
+  value
+}
+
+defaultSimulationInputs <- function(targetCovariateId,
+                                    causeCovariateIds = NULL,
+                                    targetCovariateIdPerMech = NULL,
+                                    causeCovariateIdsPerMech = NULL,
+                                    patterns = NULL) {
+  if (!is.null(patterns)) {
+    return(defaultRequiredCovariates(
+      targetCovariateId = extractPatternIds(patterns, "targetCovariateIds"),
+      causeCovariateIds = extractPatternIds(patterns, "causeCovariateIds")
+    ))
+  }
+
+  perMechanismTargets <- unlist(targetCovariateIdPerMech, use.names = FALSE)
+  perMechanismCauses <- unlist(causeCovariateIdsPerMech, use.names = FALSE)
+
+  defaultRequiredCovariates(
+    targetCovariateId = c(targetCovariateId, perMechanismTargets),
+    causeCovariateIds = c(causeCovariateIds, perMechanismCauses)
+  )
+}
+
+buildMechanismPattern <- function(mech,
+                                  targetCovariateId,
+                                  causeCovariateIds = NULL,
+                                  type = "RIGHT") {
+  switch(
+    mech,
+    MCAR = list(targetCovariateIds = targetCovariateId, mechanism = "MCAR"),
+    MAR = list(
+      targetCovariateIds = targetCovariateId,
+      causeCovariateIds = causeCovariateIds,
+      mechanism = "MAR",
+      type = type
+    ),
+    MNAR = list(
+      targetCovariateIds = targetCovariateId,
+      causeCovariateIds = targetCovariateId,
+      mechanism = "MNAR",
+      type = type
+    ),
+    stop("Unsupported mechanism: ", mech, call. = FALSE)
+  )
+}
+
 runMissingnessSimulation <- function(data,
                                      population,
                                      targetCovariateId,
@@ -288,6 +346,8 @@ runMissingnessSimulation <- function(data,
                                      missingnessRatios = seq(0, 0.8, by = 0.2),
                                      patterns = NULL,
                                      freq = NULL,
+                                     targetCovariateIdPerMech = NULL,
+                                     causeCovariateIdsPerMech = NULL,
                                      typePerMech = list(MAR = "RIGHT", MNAR = "RIGHT"),
                                      imputationOverview = NULL,
                                      imputationMethods = c(
@@ -312,7 +372,13 @@ runMissingnessSimulation <- function(data,
   count <- 1
 
   if (is.null(completeInputCovariateIds)) {
-    completeInputCovariateIds <- defaultRequiredCovariates(targetCovariateId, causeCovariateIds)
+    completeInputCovariateIds <- defaultSimulationInputs(
+      targetCovariateId = targetCovariateId,
+      causeCovariateIds = causeCovariateIds,
+      targetCovariateIdPerMech = targetCovariateIdPerMech,
+      causeCovariateIdsPerMech = causeCovariateIdsPerMech,
+      patterns = patterns
+    )
   }
 
   if (startSimulation < 1L) {
@@ -358,41 +424,40 @@ runMissingnessSimulation <- function(data,
 
     for (mech in mechanisms) {
       for (ratio in missingnessRatios) {
+        mech <- toupper(mech)
         scenarioId <- scenarioId + 1L
 
         if (scenarioId < firstScenarioThisSimulation) {
           next
         }
 
-        type <- typePerMech[[mech]]
-        if (is.null(type)) {
-          type <- "RIGHT"
-        }
+        type <- resolvePerMechanismValue(typePerMech, mech, defaultValue = "RIGHT")
+        scenarioTargetCovariateId <- resolvePerMechanismValue(
+          targetCovariateIdPerMech,
+          mech,
+          defaultValue = targetCovariateId
+        )
+        scenarioCauseCovariateIds <- resolvePerMechanismValue(
+          causeCovariateIdsPerMech,
+          mech,
+          defaultValue = causeCovariateIds
+        )
 
         if (!is.null(patterns)) {
           patternsSettings <- patterns
         } else {
           patternsSettings <- list(
-            switch(
-              mech,
-              MCAR = list(targetCovariateIds = targetCovariateId, mechanism = "MCAR"),
-              MAR = list(
-                targetCovariateIds = targetCovariateId,
-                causeCovariateIds = causeCovariateIds,
-                mechanism = "MAR",
-                type = type
-              ),
-              MNAR = list(
-                targetCovariateIds = targetCovariateId,
-                causeCovariateIds = targetCovariateId,
-                mechanism = "MNAR",
-                type = type
-              )
+            buildMechanismPattern(
+              mech = mech,
+              targetCovariateId = scenarioTargetCovariateId,
+              causeCovariateIds = scenarioCauseCovariateIds,
+              type = type
             )
           )
         }
 
-        targetVariables <- collapseIds(extractPatternIds(patternsSettings, "targetCovariateIds"))
+        scenarioTargetCovariateIds <- extractPatternIds(patternsSettings, "targetCovariateIds")
+        targetVariables <- collapseIds(scenarioTargetCovariateIds)
         causeVariables <- collapseIds(extractPatternIds(patternsSettings, "causeCovariateIds"))
 
         trainMissingSeed <- makeSeed(seed, simulationId = simulation, scenarioId = scenarioId, seedLabel = "trainMissing")
@@ -445,7 +510,7 @@ runMissingnessSimulation <- function(data,
           completeCaseResult <- completeCasePlp(
             trainData = trainMissingData,
             testData = testMissingData,
-            targetCovariateIds = targetCovariateId
+            targetCovariateIds = scenarioTargetCovariateIds
           )
 
           imputationResults <- c(list(completeCase = completeCaseResult), imputationResults)
@@ -532,7 +597,9 @@ runMissingnessSimulation <- function(data,
               scenarioId = scenarioId,
               mechanism = mech,
               ratio = ratio,
-              type = type
+              type = type,
+              targetVariables = targetVariables,
+              causeVariables = causeVariables
             )
         )
 
