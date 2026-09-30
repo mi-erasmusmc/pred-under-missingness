@@ -4,10 +4,10 @@
 <!-- badges: start -->
 <!-- badges: end -->
 
-The goal of ImputationPackage is to simulate missingness in PatientLevelPrediction data, apply imputation techniques and evaluate downstream model performance.
+The goal of ImputationPackage is to simulate missingness in PatientLevelPrediction data, apply imputation techniques, and evaluate downstream model performance.
 
 ## Overview
-This package is designed for studies that want to evaluate how different missing-data structures and imputation methods affect predicitive modeling results.
+This package is for simulation studies that want to evaluate how different missing-data structures and imputation methods affect predictive modeling results, using PatientLevelPrediction data objects.
 
 ## Features
 - Build PLP-ready data objects
@@ -18,27 +18,34 @@ This package is designed for studies that want to evaluate how different missing
 
 ## Prerequisites
 - R >= 4.2.0
-- Required packages:
+- Core dependencies used by the package include:
   - Andromeda
   - CirceR
   - DatabaseConnector
+  - DeepPatientLevelPrediction
+  - doParallel
   - dplyr
-  - FeatureExtraction
-  - margrittr
+  - foreach
+  - magrittr
   - PatientLevelPrediction
   - readr
   - rlang
-  - sqlRender
+  - SqlRender
   - tibble
-  
 
 
 ## Installation
 
-You can install the development version of ImputationPackage like so:
+From the package root, install the package with:
 
-``` r
-# FILL THIS IN! HOW CAN PEOPLE INSTALL YOUR DEV PACKAGE?
+```r
+devtools::install(upgrade = "never", dependencies = TRUE)
+```
+
+If you only want to load the package for development work without installing it, use:
+
+```r
+devtools::load_all()
 ```
 
 ## Workflow
@@ -47,6 +54,7 @@ You can install the development version of ImputationPackage like so:
 3. Apply imputation methods
 4. Fit prediction models
 5. Evaluate and summarise prediction results
+6. Visualize the results and run Friedman and Nemenyi tests
 
 ## Important Functions
 - `buildPopulationPLPData()`: to build a (complete-case) PLP data object.
@@ -57,11 +65,10 @@ You can install the development version of ImputationPackage like so:
 - `collectEvaluationTables()`: to collect model evaluation outputs into tables for comparison and evaluation summaries.
 
 ## Layout
-- `R/ `: main package functions
-- `extras/`: data exploration scripts and example scripts
-- `tests/`: test folder
+- `R/`: main package functions
+- `man/`: generated documentation files
+- `extras/`: example workflows, plotting scripts, and significance testing
 
 ## Example
 
-An example script to run a simulation is in `extras/run_workflow.R`
-
+Example scripts for running simulations are in `extras/univariate/` and `extras/multivariate/`.
